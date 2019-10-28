@@ -8,6 +8,8 @@
 
 const SlackBot = require('slackbots');
 const _ = require('lodash');
+const Table = require('easy-table')
+
 
 // const axios = require('axios');
 
@@ -24,25 +26,13 @@ const medal = {
 	icon_emoji: ':sports_medal:'
 };
 
-// Start Handler
 bot.on('start', () => {
-
-
-	bot.postMessageToChannel(
-		'pong',
-		'gamer time',
-		bat
-	);
+	bot.postMessageToChannel('pong', ':wave:', bat);
 });
 
-let leaderboard = new Map()// Error Handler
-// bot.on('error', err => console.log(err));
-leaderboard.set('UPK6JSKNY', { w: 0, l: 0 })
-leaderboard.set('AAAAAAAAA', { w: 9, l: 20 })
+let leaderboard = new Map()
 
-// Message Handler
 bot.on('message', data => {
-	console.log('data:', data)
 	if (data.type !== 'message') {
 		return;
 	}
@@ -50,22 +40,54 @@ bot.on('message', data => {
 	handleMessage(data.text);
 });
 
-// Respons to Data
 function handleMessage(message) {
-	if (message.includes('gg')) {
-		const msg = _.words(message)
-		bot.postMessageToChannel('pong', (msg[1] + ' ' + msg[2]), bat);
+	if (_.startsWith(message, 'gg')) {
+
+		const msg = _.split(message, ' ')
+		if (msg.length == 3) {
+			console.log(message, msg[1], msg[2])
+			if (leaderboard.has(msg[1])) {
+				const cur = leaderboard.get(msg[1])
+				cur.w++
+				leaderboard.set(msg[1], cur)
+			} else {
+				leaderboard.set(msg[1], { w: 1, l: 0 })
+			}
+
+			if (leaderboard.has(msg[2])) {
+				const cur = leaderboard.get(msg[2])
+				cur.l++
+				leaderboard.set(msg[2], cur)
+			} else {
+				leaderboard.set(msg[2], { w: 0, l: 1 })
+			}
+
+			bot.postMessageToChannel('pong', `gg`, bat);
+		}
 	}
 
-	else if (message.includes('lb')) {
+	else if (_.startsWith(message, 'lb')) {
 		bot.postMessageToChannel('pong', lb(), medal);
 	}
 }
 
 function lb() {
-	let s = '```\n'
+	const t = new Table
+
 	for ([k, v] of leaderboard) {
-		s += (k + ' Wins: ' + v.w + ' Losses: ' + v.l + ' Winrate: ' + (v.w / (v.w + v.l) * 100) + '%\n')
+		// s += (k + ' Wins: ' + v.w + '   Losses: ' + v.l + '   Winrate: ' + (v.w / (v.w + v.l) * 100).toFixed(2) + '%\n')
+		t.cell('Player', k)
+		t.cell('Wins', v.w)
+		t.cell('Losses', v.l)
+		t.cell('Winrate', (v.w / (v.w + v.l) * 100).toFixed(2) + '%')
+		t.newRow()
 	}
-	return s + '```'
+	console.log(t.toString())
+
+	// let s = '```\n'
+	// for ([k, v] of leaderboard) {
+	// 	s += (k + ' Wins: ' + v.w + '   Losses: ' + v.l + '   Winrate: ' + (v.w / (v.w + v.l) * 100).toFixed(2) + '%\n')
+	// }
+	// return s + '```'
+	return '```\n' + t.toString() + '\n```'
 }
