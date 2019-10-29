@@ -1,33 +1,20 @@
-// const { App } = require('@slack/bolt');
-
-// Initializes your app with your bot token and signing secret
-// const app = new App({
-// 	token: 'xoxb-795247320881-802044897232-SXlSvBrbZiUbQI8j7wM13I1s',
-// 	signingSecret: 'c154a6a81d579c2daa6632e9e955c6d4'
-// });
 
 const SlackBot = require('slackbots');
 const _ = require('lodash');
 const Table = require('easy-table')
-
-
-// const axios = require('axios');
 
 const bot = new SlackBot({
 	token: 'xoxb-795247320881-802044897232-SXlSvBrbZiUbQI8j7wM13I1s',
 	name: 'gg'
 });
 
-const bat = {
-	icon_emoji: ':table_tennis_paddle_and_ball:'
-};
-
-const medal = {
-	icon_emoji: ':sports_medal:'
-};
+const bat = { icon_emoji: ':table_tennis_paddle_and_ball:' };
+const medal = { icon_emoji: ':sports_medal:' };
+const error = { icon_emoji: ':x:' };
+const wave = { icon_emoji: ':wave:' };
 
 bot.on('start', () => {
-	bot.postMessageToChannel('pong', ':wave:', bat);
+	bot.postMessageToChannel('pong', 'bot started', wave);
 });
 
 let leaderboard = new Map()
@@ -40,12 +27,15 @@ bot.on('message', data => {
 	handleMessage(data.text);
 });
 
+function isUserId(s) {
+	return _.startsWith(s, '<@')
+}
+
 function handleMessage(message) {
 	if (_.startsWith(message, 'gg')) {
-
 		const msg = _.split(message, ' ')
-		if (msg.length == 3) {
-			console.log(message, msg[1], msg[2])
+
+		if (msg.length == 3 && isUserId(msg[1]) && isUserId(msg[2])) {
 			if (leaderboard.has(msg[1])) {
 				const cur = leaderboard.get(msg[1])
 				cur.w++
@@ -62,7 +52,9 @@ function handleMessage(message) {
 				leaderboard.set(msg[2], { w: 0, l: 1 })
 			}
 
-			bot.postMessageToChannel('pong', `gg`, bat);
+			bot.postMessageToChannel('pong', 'Game recorded. Well played, ' + msg[1], bat);
+		} else {
+			bot.postMessageToChannel('pong', 'Error recording game', error);
 		}
 	}
 
@@ -73,21 +65,20 @@ function handleMessage(message) {
 
 function lb() {
 	const t = new Table
+	const m = new Map([...leaderboard].sort((a, b) => {
+		return (a[1].w / (a[1].w + a[1].l)) < (b[1].w / (b[1].w + b[1].l))
+	}))
+	const ids = bot.getUsers()._value.members.map(x => ['<@' + x.id + '>', x.real_name])
 
-	for ([k, v] of leaderboard) {
-		// s += (k + ' Wins: ' + v.w + '   Losses: ' + v.l + '   Winrate: ' + (v.w / (v.w + v.l) * 100).toFixed(2) + '%\n')
-		t.cell('Player', k)
+	for ([k, v] of m) {
+		const kid = _.find(ids, i => i[0] == k)
+		t.cell('Player', kid[1])
+		t.cell('Games', v.w + v.l)
 		t.cell('Wins', v.w)
 		t.cell('Losses', v.l)
 		t.cell('Winrate', (v.w / (v.w + v.l) * 100).toFixed(2) + '%')
 		t.newRow()
 	}
 	console.log(t.toString())
-
-	// let s = '```\n'
-	// for ([k, v] of leaderboard) {
-	// 	s += (k + ' Wins: ' + v.w + '   Losses: ' + v.l + '   Winrate: ' + (v.w / (v.w + v.l) * 100).toFixed(2) + '%\n')
-	// }
-	// return s + '```'
-	return '```\n' + t.toString() + '\n```'
+	return '```\n' + t.toString() + '```'
 }
