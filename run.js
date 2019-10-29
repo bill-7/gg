@@ -14,7 +14,7 @@ const error = { icon_emoji: ':x:' };
 const wave = { icon_emoji: ':wave:' };
 
 bot.on('start', () => {
-	bot.postMessageToChannel('pong', 'bot started', wave);
+	bot.postMessageToChannel('pong', 'Bot started', wave);
 });
 
 let leaderboard = new Map()
@@ -35,26 +35,34 @@ function handleMessage(message) {
 	if (_.startsWith(message, 'gg')) {
 		const msg = _.split(message, ' ')
 
-		if (msg.length == 3 && isUserId(msg[1]) && isUserId(msg[2])) {
-			if (leaderboard.has(msg[1])) {
-				const cur = leaderboard.get(msg[1])
-				cur.w++
-				leaderboard.set(msg[1], cur)
-			} else {
-				leaderboard.set(msg[1], { w: 1, l: 0 })
-			}
+		if (msg.length == 3) {
+			if (isUserId(msg[1]) && isUserId(msg[2])) {
+				if (msg[1] != msg[2]) {
+					if (leaderboard.has(msg[1])) {
+						const cur = leaderboard.get(msg[1])
+						cur.w++
+						leaderboard.set(msg[1], cur)
+					} else {
+						leaderboard.set(msg[1], { w: 1, l: 0 })
+					}
 
-			if (leaderboard.has(msg[2])) {
-				const cur = leaderboard.get(msg[2])
-				cur.l++
-				leaderboard.set(msg[2], cur)
-			} else {
-				leaderboard.set(msg[2], { w: 0, l: 1 })
-			}
+					if (leaderboard.has(msg[2])) {
+						const cur = leaderboard.get(msg[2])
+						cur.l++
+						leaderboard.set(msg[2], cur)
+					} else {
+						leaderboard.set(msg[2], { w: 0, l: 1 })
+					}
+					bot.postMessageToChannel('pong', 'Game recorded. Well played, ' + msg[1], bat);
 
-			bot.postMessageToChannel('pong', 'Game recorded. Well played, ' + msg[1], bat);
+				} else {
+					bot.postMessageToChannel('pong', 'Players must be unique', error);
+				}
+			} else {
+				bot.postMessageToChannel('pong', 'Bad ID(s). Use @', error);
+			}
 		} else {
-			bot.postMessageToChannel('pong', 'Error recording game', error);
+			bot.postMessageToChannel('pong', 'Use format `gg @winner @loser`', error);
 		}
 	}
 
@@ -80,5 +88,9 @@ function lb() {
 		t.newRow()
 	}
 	console.log(t.toString())
-	return '```\n' + t.toString() + '```'
+
+	if (leaderboard.size)
+		return '```\n' + t.toString() + '```'
+	else
+		return 'No games recorded'
 }
