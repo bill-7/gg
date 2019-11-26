@@ -1,53 +1,154 @@
-
-const SlackBot = require('slackbots');
+'use strict'
 const _ = require('lodash');
 const Table = require('easy-table')
 const AWS = require('aws-sdk')
-
-
-
-// class Player {
-// 	constructor(name, w) {
-// 		this.name = name
-// 		if (w) {
-// 			this.wins = 1
-// 			this.losses = 0
-// 			this.elo = 1000
-// 		}
-// 	}
-
-// }
-
-
+const querystring = require('querystring')
 
 exports.handler = async (event, context, callback) => {
+	const documentClient = new AWS.DynamoDB.DocumentClient();
+	const messageData = querystring.parse(JSON.stringify(event.body))
+	console.log("message: " + JSON.stringify(messageData))
 
-	// const bot = new SlackBot({
-	// 	token: 'xoxb-795247320881-802044897232-SXlSvBrbZiUbQI8j7wM13I1s',
-	// 	name: 'gg'
-	// });
-	console.log("event", JSON.stringify(event))
+	const newElo = function (PlayerX, PlayerY) {
 
-	console.log("event.body", JSON.stringify(event.body))
+		//Expected Winning percentage of player X 
+		const EWP_X = 1 / (1 + 10 ^ ((PlayerY - PlayerX) / 400));
 
-	var x = "token=NiWlkGJRC4KZvzQb0v6p0Yz9&team_id=TPD799ERX&team_domain=test-rpg9146&channel_id=CPG4F21K4&channel_name=pong&user_id=UPK6JSKNY&user_name=billycuthbert74&command=%2Fw&text=%3C%40UPK6JSKNY%7Cbillycuthbert74%3E&response_url=https%3A%2F%2Fhooks.slack.com%2Fcommands%2FTPD799ERX%2F838012086469%2F0zQ0uuA8GRNV2jhcyUyigstN&trigger_id=826533339827.795247320881.30095e44a76e3fa3a8ff4683b5c4a838"
+		//Player X rating change 
+		const ScoreX = Math.round(PlayerX + 32 * (1 - EWP_X));
+		const ScoreY = Math.round(PlayerY + 32 * (0 - EWP_X));
 
-	var pairs = JSON.stringify(event.body).split('&');
-	var result = {};
-	pairs.forEach(function (pair) {
-		pair = pair.split('=');
-		result[pair[0]] = decodeURIComponent(pair[1] || '');
-	});
+		return { "x": ScoreX, "y": ScoreY };
+	};
 
-	let o = JSON.stringify(result);
-	console.log("result", o)
 
-	return response = {
+	let getInfo;
+	let putParams = {
+		TableName: "Players",
+		Item: {}
+	}
+
+	try {
+		const getParams = {
+			TableName: "Players",
+			Key: {
+				"id": messageData.user_id
+			}
+		}
+
+		getInfo = await documentClient.get(getParams).promise();
+	} catch (err) {
+		console.log("caught error " + err);
+	}
+
+	let loserId = messageData.text.trim().slice(2, 11)
+	let loserName = messageData.text.trim().slice(12, messageData.text.trim().length - 1)
+
+	console.log("loserId: " + JSON.stringify(loserId))
+
+	let getInfo2;
+	let putParams2 = {
+		TableName: "Players",
+		Item: {}
+	}
+
+	let e = {}
+
+	try {
+		const getParams2 = {
+			TableName: "Players",
+			Key: {
+				"id": loserId
+			}
+		}
+
+		getInfo2 = await documentClient.get(getParams2).promise();
+
+		e = newElo(getInfo.Item ? Number(getInfo.Item.elo) : null, getInfo2.Item ? Number(getInfo2.Item.elo) : null)
+		console.log("new elos: ", JSON.stringify(e))
+
+		if (_.isEmpty(getInfo)) {
+			putParams.Item = {
+				"id": messageData.user_id,
+				"name": messageData.user_name,
+				"wins": 1,
+				"losses": 0,
+				"elo": 1000
+			}
+		} else {
+			console.log("getInfo " + JSON.stringify(getInfo.Item.wins))
+			putParams.Item = {
+				"id": messageData.user_id,
+				"name": messageData.user_name,
+				"wins": Number(getInfo.Item.wins) + 1,
+				"losses": Number(getInfo.Item.losses),
+				"elo": Number(e.x)
+			}
+		}
+
+		try {
+			await documentClient.put(putParams).promise();
+		} catch (err) {
+			console.log(err);
+		}
+
+
+		///player 2
+
+		if (_.isEmpty(getInfo2)) {
+			putParams2.Item = {
+				"id": loserId,
+				"name": getInfo2.Item ? getInfo2.Item.name : "unknown",
+				"wins": 0,
+				"losses": 1,
+				"elo": 1000
+			}
+		} else {
+			console.log("getInfo2 " + JSON.stringify(getInfo2.Item.wins))
+			putParams2.Item = {
+				"id": loserId,
+				"name": getInfo2.Item ? getInfo2.Item.name : "unknown",
+				"wins": Number(getInfo2.Item.wins),
+				"losses": Number(getInfo2.Item.losses) + 1,
+				"elo": Number(e.y)
+			}
+		}
+
+		try {
+			await documentClient.put(putParams2).promise();
+		} catch (err) {
+			console.log(err);
+		}
+
+	} catch (err) {
+		console.log("caught error " + err);
+	}
+
+
+	// build response
+
+	const res = {
 		statusCode: 200,
-		body: o
+		// body: JSON.stringify({ text: "game recorded" })
+
+		body: JSON.stringify({ text: getInfo.Item.name + ": " + getInfo.Item.elo + " -> " + e.x + "\n" + loserName + ": " + getInfo2.Item.elo + " -> " + e.y })
 
 	}
+	callback(null, res)
 }
+
+// function decode(x) {
+// 	var pairs = JSON.stringify(x).split('&');
+// 	var result = {};
+// 	pairs.forEach(function (pair) {
+// 		pair = pair.split('=');
+// 		result[pair[0]] = decodeURIComponent(pair[1] || '');
+// 	});
+
+// 	let o = JSON.stringify(result);
+// 	console.log("result", o)
+// 	return o
+// }
 // const bat = { icon_emoji: ':table_tennis_paddle_and_ball:' };
 // const medal = { icon_emoji: ':sports_medal:' };
 // const error = { icon_emoji: ':x:' };
@@ -63,16 +164,7 @@ exports.handler = async (event, context, callback) => {
 // 	}
 // }
 
-// const putParams = {
-// 	TableName: "Players",
-// 	Item: {
-// 		"id": "76575656765",
-// 		"name": "player_name",
-// 		"wins": 1,
-// 		"losses": 0,
-// 		"elo": 1000
-// 	}
-// }
+
 
 
 
