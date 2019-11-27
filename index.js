@@ -9,132 +9,168 @@ exports.handler = async (event, context, callback) => {
 	const messageData = querystring.parse(JSON.stringify(event.body))
 	console.log("message: " + JSON.stringify(messageData))
 
-	const newElo = function (PlayerX, PlayerY) {
-
-		//Expected Winning percentage of player X 
-		const EWP_X = 1 / (1 + 10 ^ ((PlayerY - PlayerX) / 400));
-
-		//Player X rating change 
-		const ScoreX = Math.round(PlayerX + 32 * (1 - EWP_X));
-		const ScoreY = Math.round(PlayerY + 32 * (0 - EWP_X));
-
-		return { "x": ScoreX, "y": ScoreY };
-	};
-
-
-	let getInfo;
-	let putParams = {
-		TableName: "Players",
-		Item: {}
-	}
-
-	try {
-		const getParams = {
-			TableName: "Players",
-			Key: {
-				"id": messageData.user_id
+	if (messageData.command === '/lb') {
+		let scanInfo;
+		let t = new Table
+		try {
+			const scanParams = {
+				TableName: "Players"
 			}
+
+			scanInfo = await documentClient.scan(scanParams).promise();
+			console.log("scanInfo" + JSON.stringify(scanInfo))
+
+			scanInfo.Items.forEach(p => {
+				t.cell('Player', p.name)
+				t.cell('Wins', p.wins)
+				t.cell('Losses', p.losses)
+				t.cell('Games', p.wins + p.losses)
+				t.cell('Win Rate', (p.wins / (p.wins + p.losses) * 100).toFixed(2) + '%')
+				t.cell('Elo', p.elo)
+				t.newRow()
+			})
+			t.sort(['Elo|des'])
+			console.log("t: " + t.toString())
+		} catch (err) {
+			console.log("caught error " + err);
 		}
 
-		getInfo = await documentClient.get(getParams).promise();
-	} catch (err) {
-		console.log("caught error " + err);
-	}
 
-	let loserId = messageData.text.trim().slice(2, 11)
-	let loserName = messageData.text.trim().slice(12, messageData.text.trim().length - 1)
 
-	console.log("loserId: " + JSON.stringify(loserId))
-
-	let getInfo2;
-	let putParams2 = {
-		TableName: "Players",
-		Item: {}
-	}
-
-	let e = {}
-
-	try {
-		const getParams2 = {
-			TableName: "Players",
-			Key: {
-				"id": loserId
-			}
+		const res = {
+			statusCode: 200,
+			body: JSON.stringify({ text: "```\n" + t.toString() + "```" })
 		}
+		callback(null, res)
 
-		getInfo2 = await documentClient.get(getParams2).promise();
+	} else if (messageData.command === '/gg') {
+		const newElo = function (PlayerX, PlayerY) {
 
-		e = newElo(getInfo.Item ? Number(getInfo.Item.elo) : null, getInfo2.Item ? Number(getInfo2.Item.elo) : null)
-		console.log("new elos: ", JSON.stringify(e))
+			//Expected Winning percentage of player X 
+			const EWP_X = 1 / (1 + 10 ^ ((PlayerY - PlayerX) / 400));
 
-		if (_.isEmpty(getInfo)) {
-			putParams.Item = {
-				"id": messageData.user_id,
-				"name": messageData.user_name,
-				"wins": 1,
-				"losses": 0,
-				"elo": 1000
-			}
-		} else {
-			console.log("getInfo " + JSON.stringify(getInfo.Item.wins))
-			putParams.Item = {
-				"id": messageData.user_id,
-				"name": messageData.user_name,
-				"wins": Number(getInfo.Item.wins) + 1,
-				"losses": Number(getInfo.Item.losses),
-				"elo": Number(e.x)
-			}
+			//Player X rating change 
+			const ScoreX = Math.round(PlayerX + 32 * (1 - EWP_X));
+			const ScoreY = Math.round(PlayerY + 32 * (0 - EWP_X));
+
+			return { "x": ScoreX, "y": ScoreY };
+		};
+
+
+		let getInfo;
+		let putParams = {
+			TableName: "Players",
+			Item: {}
 		}
 
 		try {
-			await documentClient.put(putParams).promise();
+			const getParams = {
+				TableName: "Players",
+				Key: {
+					"id": messageData.user_id
+				}
+			}
+
+			getInfo = await documentClient.get(getParams).promise();
 		} catch (err) {
-			console.log(err);
+			console.log("caught error " + err);
 		}
 
+		let loserId = messageData.text.trim().slice(2, 11)
+		let loserName = messageData.text.trim().slice(12, messageData.text.trim().length - 1)
 
-		///player 2
+		console.log("loserId: " + JSON.stringify(loserId))
 
-		if (_.isEmpty(getInfo2)) {
-			putParams2.Item = {
-				"id": loserId,
-				"name": getInfo2.Item ? getInfo2.Item.name : "unknown",
-				"wins": 0,
-				"losses": 1,
-				"elo": 1000
-			}
-		} else {
-			console.log("getInfo2 " + JSON.stringify(getInfo2.Item.wins))
-			putParams2.Item = {
-				"id": loserId,
-				"name": getInfo2.Item ? getInfo2.Item.name : "unknown",
-				"wins": Number(getInfo2.Item.wins),
-				"losses": Number(getInfo2.Item.losses) + 1,
-				"elo": Number(e.y)
-			}
+		let getInfo2;
+		let putParams2 = {
+			TableName: "Players",
+			Item: {}
 		}
+
+		let e = {}
 
 		try {
-			await documentClient.put(putParams2).promise();
+			const getParams2 = {
+				TableName: "Players",
+				Key: {
+					"id": loserId
+				}
+			}
+
+			getInfo2 = await documentClient.get(getParams2).promise();
+
+			e = newElo(getInfo.Item ? Number(getInfo.Item.elo) : null, getInfo2.Item ? Number(getInfo2.Item.elo) : null)
+			console.log("new elos: ", JSON.stringify(e))
+
+			if (_.isEmpty(getInfo)) {
+				putParams.Item = {
+					"id": messageData.user_id,
+					"name": messageData.user_name,
+					"wins": 1,
+					"losses": 0,
+					"elo": 1000
+				}
+			} else {
+				console.log("getInfo " + JSON.stringify(getInfo.Item.wins))
+				putParams.Item = {
+					"id": messageData.user_id,
+					"name": messageData.user_name,
+					"wins": Number(getInfo.Item.wins) + 1,
+					"losses": Number(getInfo.Item.losses),
+					"elo": Number(e.x)
+				}
+			}
+
+			try {
+				await documentClient.put(putParams).promise();
+			} catch (err) {
+				console.log(err);
+			}
+
+
+			///player 2
+
+			if (_.isEmpty(getInfo2)) {
+				putParams2.Item = {
+					"id": loserId,
+					"name": getInfo2.Item ? getInfo2.Item.name : "unknown",
+					"wins": 0,
+					"losses": 1,
+					"elo": 1000
+				}
+			} else {
+				console.log("getInfo2 " + JSON.stringify(getInfo2.Item.wins))
+				putParams2.Item = {
+					"id": loserId,
+					"name": getInfo2.Item ? getInfo2.Item.name : "unknown",
+					"wins": Number(getInfo2.Item.wins),
+					"losses": Number(getInfo2.Item.losses) + 1,
+					"elo": Number(e.y)
+				}
+			}
+
+			try {
+				await documentClient.put(putParams2).promise();
+			} catch (err) {
+				console.log(err);
+			}
+
 		} catch (err) {
-			console.log(err);
+			console.log("caught error " + err);
 		}
 
-	} catch (err) {
-		console.log("caught error " + err);
+
+		// build response
+
+		const res = {
+			statusCode: 200,
+			// body: JSON.stringify({ text: "game recorded" })
+
+			body: JSON.stringify({ text: getInfo.Item.name + ": " + getInfo.Item.elo + " -> " + e.x + "\n" + loserName + ": " + getInfo2.Item.elo + " -> " + e.y })
+
+		}
+		callback(null, res)
 	}
-
-
-	// build response
-
-	const res = {
-		statusCode: 200,
-		// body: JSON.stringify({ text: "game recorded" })
-
-		body: JSON.stringify({ text: getInfo.Item.name + ": " + getInfo.Item.elo + " -> " + e.x + "\n" + loserName + ": " + getInfo2.Item.elo + " -> " + e.y })
-
-	}
-	callback(null, res)
 }
 
 // function decode(x) {
