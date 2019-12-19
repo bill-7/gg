@@ -3,6 +3,7 @@ const _ = require('lodash');
 const Table = require('easy-table')
 const AWS = require('aws-sdk')
 const querystring = require('querystring')
+const Elo = require('elo-js')
 
 exports.handler = async (event, context, callback) => {
 	const documentClient = new AWS.DynamoDB.DocumentClient();
@@ -21,11 +22,11 @@ exports.handler = async (event, context, callback) => {
 			console.log("scanInfo" + JSON.stringify(scanInfo))
 
 			scanInfo.Items.forEach(p => {
-				t.cell('Player', p.name)
+				t.cell('Player', p.name.split('.')[0])
 				t.cell('Wins', p.wins)
 				t.cell('Losses', p.losses)
 				t.cell('Games', p.wins + p.losses)
-				t.cell('Win Rate', (p.wins / (p.wins + p.losses) * 100).toFixed(2) + '%')
+				t.cell('Winrate', (p.wins / (p.wins + p.losses) * 100).toFixed(2) + '%')
 				t.cell('Elo', p.elo)
 				t.newRow()
 			})
@@ -35,8 +36,6 @@ exports.handler = async (event, context, callback) => {
 			console.log("caught error " + err);
 		}
 
-
-
 		const res = {
 			statusCode: 200,
 			body: JSON.stringify({ text: "```\n" + t.toString() + "```" })
@@ -44,16 +43,12 @@ exports.handler = async (event, context, callback) => {
 		callback(null, res)
 
 	} else if (messageData.command === '/gg') {
-		const newElo = function (PlayerX, PlayerY) {
+		const newElo = function (winner, loser) {
+			let e = new Elo()
+			const winnerNewElo = e.ifWins(winner, loser)
+			const loserNewElo = e.ifLoses(loser, winner)
 
-			//Expected Winning percentage of player X 
-			const EWP_X = 1 / (1 + 10 ^ ((PlayerY - PlayerX) / 400));
-
-			//Player X rating change 
-			const ScoreX = Math.round(PlayerX + 32 * (1 - EWP_X));
-			const ScoreY = Math.round(PlayerY + 32 * (0 - EWP_X));
-
-			return { "x": ScoreX, "y": ScoreY };
+			return { "x": winnerNewElo, "y": loserNewElo };
 		};
 
 
