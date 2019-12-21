@@ -4,6 +4,8 @@ const Table = require('easy-table')
 const AWS = require('aws-sdk')
 const querystring = require('querystring')
 const Elo = require('elo-js')
+const Uuid = require('uuid')
+const Moment = require('moment')
 
 exports.handler = async (event, context, callback) => {
 	const documentClient = new AWS.DynamoDB.DocumentClient();
@@ -42,6 +44,40 @@ exports.handler = async (event, context, callback) => {
 		}
 		callback(null, res)
 
+	} else if (messageData.command === '/tg') {
+		let gameInfo;
+		let t = new Table
+		
+		try {
+			const gameParams = {
+				TableName: "Games"
+			}
+
+			gameInfo = await documentClient.scan(gameParams).promise();
+			console.log("gameInfo" + JSON.stringify(gameInfo))
+
+			gameInfo.Items.forEach(g => {
+				if (Moment(g.datetime).format('L') == Moment(Moment.now()).format('L')) {
+					t.cell('Time', Moment(g.datetime).format('LT'))
+					t.cell('Winner', g.winner.name.split('.')[0] + ' (' + g.winner.elo.old + ' -> ' + g.winner.elo.new + ')')
+					t.cell('Loser', g.loser.name.split('.')[0] + ' (' + g.loser.elo.old + ' -> ' + g.loser.elo.new + ')')
+					t.newRow()
+				}
+			})
+			// t.sort(['Elo|des'])
+			console.log("t: " + t.toString())
+		} catch (err) {
+			console.log("caught error " + err);
+		}
+
+		const res = {
+			statusCode: 200,
+			body: JSON.stringify({ text: "```\n" + Moment(Moment.now()).format('L') + '\n' + t.toString() + "```" })
+		}
+		callback(null, res)
+
+
+
 	} else if (messageData.command === '/gg') {
 		const newElo = function (winner, loser) {
 			let e = new Elo()
@@ -50,7 +86,6 @@ exports.handler = async (event, context, callback) => {
 
 			return { "x": winnerNewElo, "y": loserNewElo };
 		};
-
 
 		let getInfo;
 		let putParams = {
@@ -122,7 +157,6 @@ exports.handler = async (event, context, callback) => {
 				console.log(err);
 			}
 
-
 			///player 2
 
 			if (_.isEmpty(getInfo2)) {
@@ -155,12 +189,38 @@ exports.handler = async (event, context, callback) => {
 		}
 
 
-		// build response
+		let gamePut = {
+			TableName: "Games",
+			Item: { 
+				"id": Uuid(),
+				"datetime": Moment.now(),
+				"winner": {
+					"name": getInfo.Item.name,
+					"elo": {
+						"old": getInfo.Item.elo || 1000,
+						"new": e.x
+					}
+				},
+				"loser": {
+					"name": loserName,
+					"elo": {
+						"old": getInfo2.Item.elo || 1000,
+						"new": e.y
+					}
+				}
+			}
+		}
+
+		console.log("gamePut", gamePut)
+
+		try {
+			await documentClient.put(gamePut).promise();
+		} catch (err) {
+			console.log("game record error", err);
+		}
 
 		const res = {
 			statusCode: 200,
-			// body: JSON.stringify({ text: "game recorded" })
-
 			body: JSON.stringify({ text: getInfo.Item.name + ": " + getInfo.Item.elo + " -> " + e.x + "\n" + loserName + ": " + getInfo2.Item.elo + " -> " + e.y })
 
 		}
