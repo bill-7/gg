@@ -24,7 +24,7 @@ exports.handler = async (event, context, callback) => {
 			console.log("scanInfo" + JSON.stringify(scanInfo))
 
 			scanInfo.Items.forEach(p => {
-				t.cell('Player', p.name.split('.')[0])
+				t.cell('Player', p.name)
 				t.cell('Wins', p.wins)
 				t.cell('Losses', p.losses)
 				t.cell('Games', p.wins + p.losses)
@@ -45,6 +45,7 @@ exports.handler = async (event, context, callback) => {
 		callback(null, res)
 
 	} else if (messageData.command === '/tg') {
+		let chosenDay = messageData.text ? Moment(messageData.text, 'DDMMYY') : Moment.now()
 		let gameInfo;
 		let t = new Table
 		
@@ -57,14 +58,14 @@ exports.handler = async (event, context, callback) => {
 			console.log("gameInfo" + JSON.stringify(gameInfo))
 
 			gameInfo.Items.forEach(g => {
-				if (Moment(g.datetime).format('L') == Moment(Moment.now()).format('L')) {
-					t.cell('Time', Moment(g.datetime).format('LT'))
-					t.cell('Winner', g.winner.name.split('.')[0] + ' (' + g.winner.elo.old + ' -> ' + g.winner.elo.new + ')')
-					t.cell('Loser', g.loser.name.split('.')[0] + ' (' + g.loser.elo.old + ' -> ' + g.loser.elo.new + ')')
+				if (Moment(g.datetime).format('L') == Moment(chosenDay).format('L')) {
+					t.cell('Time', Moment(g.datetime).format('HH:mm:ss'))
+					t.cell('Winner', g.winner.name + ' (' + g.winner.elo.old + ' -> ' + g.winner.elo.new + ')')
+					t.cell('Loser', g.loser.name + ' (' + g.loser.elo.old + ' -> ' + g.loser.elo.new + ')')
 					t.newRow()
 				}
 			})
-			// t.sort(['Elo|des'])
+			t.sort(['Time|asc'])
 			console.log("t: " + t.toString())
 		} catch (err) {
 			console.log("caught error " + err);
@@ -72,11 +73,9 @@ exports.handler = async (event, context, callback) => {
 
 		const res = {
 			statusCode: 200,
-			body: JSON.stringify({ text: "```\n" + Moment(Moment.now()).format('L') + '\n' + t.toString() + "```" })
+			body: JSON.stringify({ text: "```\n" + Moment(chosenDay).format('dddd, DD/MM/GG') + '\n\n' + t.toString() + "```" })
 		}
 		callback(null, res)
-
-
 
 	} else if (messageData.command === '/gg') {
 		const newElo = function (winner, loser) {
@@ -84,11 +83,11 @@ exports.handler = async (event, context, callback) => {
 			const winnerNewElo = e.ifWins(winner, loser)
 			const loserNewElo = e.ifLoses(loser, winner)
 
-			return { "x": winnerNewElo, "y": loserNewElo };
+			return { "winner": winnerNewElo, "loser": loserNewElo };
 		};
 
-		let getInfo;
-		let putParams = {
+		let winnerInfo;
+		let winnerPutParams = {
 			TableName: "Players",
 			Item: {}
 		}
@@ -101,39 +100,38 @@ exports.handler = async (event, context, callback) => {
 				}
 			}
 
-			getInfo = await documentClient.get(getParams).promise();
+			winnerInfo = await documentClient.get(getParams).promise();
 		} catch (err) {
 			console.log("caught error " + err);
 		}
 
 		let loserId = messageData.text.trim().slice(2, 11)
-		let loserName = messageData.text.trim().slice(12, messageData.text.trim().length - 1)
 
 		console.log("loserId: " + JSON.stringify(loserId))
 
-		let getInfo2;
-		let putParams2 = {
+		let loserInfo;
+		let loserPutParams = {
 			TableName: "Players",
 			Item: {}
 		}
 
-		let e = {}
+		let newElos = {}
 
 		try {
-			const getParams2 = {
+			const loserGetParams = {
 				TableName: "Players",
 				Key: {
 					"id": loserId
 				}
 			}
 
-			getInfo2 = await documentClient.get(getParams2).promise();
+			loserInfo = await documentClient.get(loserGetParams).promise();
 
-			e = newElo(getInfo.Item ? Number(getInfo.Item.elo) : null, getInfo2.Item ? Number(getInfo2.Item.elo) : null)
-			console.log("new elos: ", JSON.stringify(e))
+			newElos = newElo(winnerInfo.Item ? Number(winnerInfo.Item.elo) : null, loserInfo.Item ? Number(loserInfo.Item.elo) : null)
+			console.log("new elos: ", JSON.stringify(newElos))
 
-			if (_.isEmpty(getInfo)) {
-				putParams.Item = {
+			if (_.isEmpty(winnerInfo)) {
+				winnerPutParams.Item = {
 					"id": messageData.user_id,
 					"name": messageData.user_name,
 					"wins": 1,
@@ -141,45 +139,43 @@ exports.handler = async (event, context, callback) => {
 					"elo": 1000
 				}
 			} else {
-				console.log("getInfo " + JSON.stringify(getInfo.Item.wins))
-				putParams.Item = {
-					"id": messageData.user_id,
-					"name": messageData.user_name,
-					"wins": Number(getInfo.Item.wins) + 1,
-					"losses": Number(getInfo.Item.losses),
-					"elo": Number(e.x)
+				console.log("getInfo " + JSON.stringify(winnerInfo.Item.wins))
+				winnerPutParams.Item = {
+					"id": winnerInfo.Item.id,
+					"name": winnerInfo.Item.name,
+					"wins": Number(winnerInfo.Item.wins) + 1,
+					"losses": Number(winnerInfo.Item.losses),
+					"elo": Number(newElos.winner)
 				}
 			}
 
 			try {
-				await documentClient.put(putParams).promise();
+				await documentClient.put(winnerPutParams).promise();
 			} catch (err) {
 				console.log(err);
 			}
 
-			///player 2
-
-			if (_.isEmpty(getInfo2)) {
-				putParams2.Item = {
+			if (_.isEmpty(loserInfo)) {
+				loserPutParams.Item = {
 					"id": loserId,
-					"name": getInfo2.Item ? getInfo2.Item.name : "unknown",
+					"name": loserInfo.Item ? loserInfo.Item.name : "unknown",
 					"wins": 0,
 					"losses": 1,
 					"elo": 1000
 				}
 			} else {
-				console.log("getInfo2 " + JSON.stringify(getInfo2.Item.wins))
-				putParams2.Item = {
+				console.log("getInfo2 " + JSON.stringify(loserInfo.Item.wins))
+				loserPutParams.Item = {
 					"id": loserId,
-					"name": getInfo2.Item ? getInfo2.Item.name : "unknown",
-					"wins": Number(getInfo2.Item.wins),
-					"losses": Number(getInfo2.Item.losses) + 1,
-					"elo": Number(e.y)
+					"name": loserInfo.Item ? loserInfo.Item.name : "unknown",
+					"wins": Number(loserInfo.Item.wins),
+					"losses": Number(loserInfo.Item.losses) + 1,
+					"elo": Number(newElos.loser)
 				}
 			}
 
 			try {
-				await documentClient.put(putParams2).promise();
+				await documentClient.put(loserPutParams).promise();
 			} catch (err) {
 				console.log(err);
 			}
@@ -195,17 +191,17 @@ exports.handler = async (event, context, callback) => {
 				"id": Uuid(),
 				"datetime": Moment.now(),
 				"winner": {
-					"name": getInfo.Item.name,
+					"name": winnerInfo.Item.name,
 					"elo": {
-						"old": getInfo.Item.elo || 1000,
-						"new": e.x
+						"old": winnerInfo.Item.elo || 1000,
+						"new": newElos.winner
 					}
 				},
 				"loser": {
-					"name": loserName,
+					"name": loserInfo.Item.name,
 					"elo": {
-						"old": getInfo2.Item.elo || 1000,
-						"new": e.y
+						"old": loserInfo.Item.elo || 1000,
+						"new": newElos.loser
 					}
 				}
 			}
@@ -221,139 +217,9 @@ exports.handler = async (event, context, callback) => {
 
 		const res = {
 			statusCode: 200,
-			body: JSON.stringify({ text: getInfo.Item.name + ": " + getInfo.Item.elo + " -> " + e.x + "\n" + loserName + ": " + getInfo2.Item.elo + " -> " + e.y })
+			body: JSON.stringify({ text: winnerInfo.Item.name + ": " + winnerInfo.Item.elo + " -> " + newElos.winner + "\n" + loserInfo.Item.name + ": " + loserInfo.Item.elo + " -> " + newElos.loser })
 
 		}
 		callback(null, res)
 	}
 }
-
-// function decode(x) {
-// 	var pairs = JSON.stringify(x).split('&');
-// 	var result = {};
-// 	pairs.forEach(function (pair) {
-// 		pair = pair.split('=');
-// 		result[pair[0]] = decodeURIComponent(pair[1] || '');
-// 	});
-
-// 	let o = JSON.stringify(result);
-// 	console.log("result", o)
-// 	return o
-// }
-// const bat = { icon_emoji: ':table_tennis_paddle_and_ball:' };
-// const medal = { icon_emoji: ':sports_medal:' };
-// const error = { icon_emoji: ':x:' };
-// const wave = { icon_emoji: ':wave:' };
-
-// const ddb = new AWS.DynamoDB();
-// const documentClient = new AWS.DynamoDB.DocumentClient();
-
-// const getParams = {
-// 	TableName: "Players",
-// 	Key: {
-// 		"id": "12345"
-// 	}
-// }
-
-
-
-
-
-// try {
-// 	const data = await documentClient.put(putParams).promise();
-// 	console.log(data);
-// } catch (err) {
-// 	console.log(err);
-// }
-
-// try {
-// 	const data = await documentClient.get(getParams).promise();
-// 	console.log(data);
-// } catch (err) {
-// 	console.log(err);
-// }
-
-
-// bot.on('start', () => {
-// 	bot.postMessageToChannel('pong', 'Bot started', wave);
-// });
-
-// let leaderboard = new Map()
-
-// bot.on('message', data => {
-// 	if (data.type !== 'message') {
-// 		return;
-// 	}
-
-// 	handleMessage(data.text);
-// });
-
-// function isUserId(s) {
-// 	return _.startsWith(s, '<@')
-// }
-
-// function handleMessage(message) {
-// 	if (_.startsWith(message, 'gg')) {
-// 		const msg = _.split(message, ' ')
-
-// 		if (msg.length == 3) {
-// 			if (isUserId(msg[1]) && isUserId(msg[2])) {
-// 				if (msg[1] != msg[2]) {
-// 					if (leaderboard.has(msg[1])) {
-// 						const cur = leaderboard.get(msg[1])
-// 						cur.w++
-// 						leaderboard.set(msg[1], cur)
-// 					} else {
-// 						leaderboard.set(msg[1], { w: 1, l: 0 })
-// 					}
-
-// 					if (leaderboard.has(msg[2])) {
-// 						const cur = leaderboard.get(msg[2])
-// 						cur.l++
-// 						leaderboard.set(msg[2], cur)
-// 					} else {
-// 						leaderboard.set(msg[2], { w: 0, l: 1 })
-// 					}
-// 					bot.postMessageToChannel('pong', 'Game recorded. Well played, ' + msg[1], bat);
-
-// 				} else {
-// 					bot.postMessageToChannel('pong', 'Players must be unique', error);
-// 				}
-// 			} else {
-// 				bot.postMessageToChannel('pong', 'Bad ID(s). Use @', error);
-// 			}
-// 		} else {
-// 			bot.postMessageToChannel('pong', 'Use format `gg @winner @loser`', error);
-// 		}
-// 	}
-
-// 	else if (_.startsWith(message, 'lb')) {
-
-// 		bot.postMessageToChannel('pong', lb(), medal);
-// 	}
-// }
-
-// function lb() {
-// 	const t = new Table
-// 	const m = new Map([...leaderboard].sort((a, b) => {
-// 		return (a[1].w / (a[1].w + a[1].l)) < (b[1].w / (b[1].w + b[1].l))
-// 	}))
-// 	const ids = bot.getUsers()._value.members.map(x => ['<@' + x.id + '>', x.real_name])
-// 	console.log(ids)
-
-// 	for ([k, v] of m) {
-// 		const kid = _.find(ids, i => i[0] == k)
-// 		t.cell('Player', kid[1])
-// 		t.cell('Games', v.w + v.l)
-// 		t.cell('Wins', v.w)
-// 		t.cell('Losses', v.l)
-// 		t.cell('Winrate', (v.w / (v.w + v.l) * 100).toFixed(2) + '%')
-// 		t.newRow()
-// 	}
-// 	console.log(t.toString())
-
-// 	if (leaderboard.size)
-// 		return '```\n' + t.toString() + '```'
-// 	else
-// 		return 'No games recorded'
-// }
