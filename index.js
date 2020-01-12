@@ -12,7 +12,7 @@ exports.handler = async (event, context, callback) => {
 	const messageData = querystring.parse(JSON.stringify(event.body))
 	console.log("message: " + JSON.stringify(messageData))
 
-	switch(messageData.command) {
+	switch (messageData.command) {
 		case '/lb':
 			await leaderboard(documentClient, callback);
 			break;
@@ -198,13 +198,15 @@ async function leaderboard(documentClient, callback) {
 		scanInfo = await documentClient.scan(scanParams).promise();
 		console.log("scanInfo" + JSON.stringify(scanInfo));
 		scanInfo.Items.forEach(p => {
-			t.cell('Player', p.name);
-			t.cell('Wins', p.wins);
-			t.cell('Losses', p.losses);
-			t.cell('Games', p.wins + p.losses);
-			t.cell('Winrate', (p.wins / (p.wins + p.losses) * 100).toFixed(2) + '%');
-			t.cell('Elo', p.elo);
-			t.newRow();
+			if (p.wins + p.losses != 0) {
+				t.cell('Player', p.name);
+				t.cell('Wins', p.wins);
+				t.cell('Losses', p.losses);
+				t.cell('Games', p.wins + p.losses);
+				t.cell('Winrate', (p.wins / (p.wins + p.losses) * 100).toFixed(2) + '%');
+				t.cell('Elo', p.elo);
+				t.newRow();
+			}
 		});
 		t.sort(['Elo|des']);
 		console.log("t: " + t.toString());
