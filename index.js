@@ -22,6 +22,9 @@ exports.handler = async (event, context, callback) => {
 		case '/gg':
 			await recordWin(messageData, documentClient, callback);
 			break;
+		case '/wc':
+			await winChance(messageData, documentClient, callback);
+			break;
 	}
 }
 
@@ -32,41 +35,24 @@ async function recordWin(messageData, documentClient, callback) {
 		const loserNewElo = e.ifLoses(loser, winner);
 		return { "winner": winnerNewElo, "loser": loserNewElo };
 	};
-	let winnerInfo;
+	let winnerInfo = await getPlayerData(messageData.user_id, documentClient);
 	let winnerPutParams = {
 		TableName: "Players",
 		Item: {}
 	};
-	try {
-		const getParams = {
-			TableName: "Players",
-			Key: {
-				"id": messageData.user_id
-			}
-		};
-		winnerInfo = await documentClient.get(getParams).promise();
-	}
-	catch (err) {
-		console.log("caught error " + err);
-	}
+	
 	let loserId = messageData.text.trim().slice(2, 11);
 	console.log("loserId: " + JSON.stringify(loserId));
-	let loserInfo;
+	let loserInfo = await getPlayerData(loserId, documentClient);
 	let loserPutParams = {
 		TableName: "Players",
 		Item: {}
 	};
 	let newElos = {};
 	try {
-		const loserGetParams = {
-			TableName: "Players",
-			Key: {
-				"id": loserId
-			}
-		};
-		loserInfo = await documentClient.get(loserGetParams).promise();
 		newElos = newElo(winnerInfo.Item ? Number(winnerInfo.Item.elo) : null, loserInfo.Item ? Number(loserInfo.Item.elo) : null);
 		console.log("new elos: ", JSON.stringify(newElos));
+
 		if (_.isEmpty(winnerInfo)) {
 			winnerPutParams.Item = {
 				"id": messageData.user_id,
@@ -220,3 +206,40 @@ async function leaderboard(documentClient, callback) {
 	};
 	callback(null, res);
 }
+
+
+async function winChance(messageData, documentClient, callback) {
+	const loserId = messageData.text.trim().slice(2, 11);
+
+	const winnerInfo = await getPlayerData(messageData.user_id, documentClient)
+	const loserInfo = await getPlayerData(loserId, documentClient)
+
+	const e = new Elo()
+	const percentage = (e.odds(winnerInfo.Item.elo, loserInfo.Item.elo) * 100).toFixed(2);
+	
+	const res = {
+		statusCode: 200,
+		body: JSON.stringify({ text: percentage + "% chance to win vs. " + loserInfo.Item.name })
+	};
+
+	callback(null, res);
+}
+
+async function getPlayerData(playerId, documentClient) {
+	let info;
+	try {
+		const getParams = {
+			TableName: "Players",
+			Key: {
+				"id": playerId
+			}
+		};
+		info = await documentClient.get(getParams).promise();
+
+		return info;
+	} 
+	catch (err) {
+		console.log("getPlayerData: caught error " + err);
+	}
+}
+
