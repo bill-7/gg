@@ -7,43 +7,65 @@ const Elo = require('elo-js')
 const Uuid = require('uuid')
 const Moment = require('moment')
 
-exports.handler = async (event, context, callback) => {
-	const documentClient = new AWS.DynamoDB.DocumentClient();
-	const messageData = querystring.parse(JSON.stringify(event.body))
+const documentClient = new AWS.DynamoDB.DocumentClient();
+let messageData;
+let callback;
+
+exports.handler = async (event, context, cb) => {
+	callback = cb;
+	messageData = querystring.parse(JSON.stringify(event.body))
 	console.log("message: " + JSON.stringify(messageData))
 
 	switch (messageData.command) {
 		case '/lb':
-			await leaderboard(documentClient, callback);
+			await leaderboard();
 			break;
 		case '/tg':
-			await todaysGames(messageData, documentClient, callback);
+			await todaysGames();
 			break;
 		case '/gg':
-			await recordWin(messageData, documentClient, callback);
+			await recordWins();
 			break;
 		case '/wc':
-			await winChance(messageData, documentClient, callback);
+			await winChance();
 			break;
 	}
 }
 
-async function recordWin(messageData, documentClient, callback) {
+async function recordWins() {
+	const messageTokens = messageData.text.trim().split(' ')
+	const loserId = getLoserId(messageTokens[0])
+	const winCount = (messageTokens.length == 2 && Number(messageTokens[1]) != NaN)
+		? Number(messageTokens[1]) 
+		: 1
+	
+	let resBody = "";
+	for (let i = 0; i < winCount; i++) {
+		resBody += (await recordWin(loserId, i * 3000) + "\n\n")
+	}
+
+	const res = {
+		statusCode: 200,
+		body: JSON.stringify({ text: resBody })
+	};
+
+	callback(null, res);
+}
+
+async function recordWin(loserId, timeOffset) {
 	const newElo = function (winner, loser) {
 		let e = new Elo();
 		const winnerNewElo = e.ifWins(winner, loser);
 		const loserNewElo = e.ifLoses(loser, winner);
 		return { "winner": winnerNewElo, "loser": loserNewElo };
 	};
-	let winnerInfo = await getPlayerData(messageData.user_id, documentClient);
+	let winnerInfo = await getPlayerData(messageData.user_id);
 	let winnerPutParams = {
 		TableName: "Players",
 		Item: {}
 	};
-	
-	let loserId = messageData.text.trim().slice(2, 11);
-	console.log("loserId: " + JSON.stringify(loserId));
-	let loserInfo = await getPlayerData(loserId, documentClient);
+
+	let loserInfo = await getPlayerData(loserId);
 	let loserPutParams = {
 		TableName: "Players",
 		Item: {}
@@ -63,7 +85,6 @@ async function recordWin(messageData, documentClient, callback) {
 			};
 		}
 		else {
-			console.log("getInfo " + JSON.stringify(winnerInfo.Item.wins));
 			winnerPutParams.Item = {
 				"id": winnerInfo.Item.id,
 				"name": winnerInfo.Item.name,
@@ -88,7 +109,6 @@ async function recordWin(messageData, documentClient, callback) {
 			};
 		}
 		else {
-			console.log("getInfo2 " + JSON.stringify(loserInfo.Item.wins));
 			loserPutParams.Item = {
 				"id": loserId,
 				"name": loserInfo.Item ? loserInfo.Item.name : "unknown",
@@ -111,7 +131,7 @@ async function recordWin(messageData, documentClient, callback) {
 		TableName: "Games",
 		Item: {
 			"id": Uuid(),
-			"datetime": Moment.now(),
+			"datetime": Moment.now() + timeOffset,
 			"winner": {
 				"name": winnerInfo.Item.name,
 				"elo": {
@@ -135,23 +155,17 @@ async function recordWin(messageData, documentClient, callback) {
 	catch (err) {
 		console.log("game record error", err);
 	}
-	const res = {
-		statusCode: 200,
-		body: JSON.stringify({ text: winnerInfo.Item.name + ": " + winnerInfo.Item.elo + " -> " + newElos.winner + "\n" + loserInfo.Item.name + ": " + loserInfo.Item.elo + " -> " + newElos.loser })
-	};
-	callback(null, res);
+	return winnerInfo.Item.name + ": " + winnerInfo.Item.elo + " -> " + newElos.winner + "\n" + loserInfo.Item.name + ": " + loserInfo.Item.elo + " -> " + newElos.loser
 }
 
-async function todaysGames(messageData, documentClient, callback) {
+async function todaysGames() {
 	let chosenDay = messageData.text ? Moment(messageData.text, 'DDMMYY') : Moment.now();
-	let gameInfo;
 	let t = new Table;
 	try {
 		const gameParams = {
 			TableName: "Games"
 		};
-		gameInfo = await documentClient.scan(gameParams).promise();
-		console.log("gameInfo" + JSON.stringify(gameInfo));
+		const gameInfo = await documentClient.scan(gameParams).promise();
 		gameInfo.Items.forEach(g => {
 			if (Moment(g.datetime).format('L') == Moment(chosenDay).format('L')) {
 				t.cell('Time', Moment(g.datetime).format('HH:mm:ss'));
@@ -173,8 +187,7 @@ async function todaysGames(messageData, documentClient, callback) {
 	callback(null, res);
 }
 
-
-async function leaderboard(documentClient, callback) {
+async function leaderboard() {
 	let scanInfo;
 	let t = new Table;
 	try {
@@ -207,16 +220,12 @@ async function leaderboard(documentClient, callback) {
 	callback(null, res);
 }
 
-
-async function winChance(messageData, documentClient, callback) {
-	const loserId = messageData.text.trim().slice(2, 11);
-
-	const winnerInfo = await getPlayerData(messageData.user_id, documentClient)
-	const loserInfo = await getPlayerData(loserId, documentClient)
-
+async function winChance() {
+	const loserId = getLoserId(messageData.text)
+	const winnerInfo = await getPlayerData(messageData.user_id)
+	const loserInfo = await getPlayerData(loserId)
 	const e = new Elo()
 	const percentage = (e.odds(winnerInfo.Item.elo, loserInfo.Item.elo) * 100).toFixed(2);
-	
 	const res = {
 		statusCode: 200,
 		body: JSON.stringify({ text: percentage + "% chance to win vs. " + loserInfo.Item.name })
@@ -225,8 +234,23 @@ async function winChance(messageData, documentClient, callback) {
 	callback(null, res);
 }
 
-async function getPlayerData(playerId, documentClient) {
-	let info;
+function getLoserId(string) {
+	let loserId = string.trim().split('|')
+	if (loserId[0].length != 11) {
+		const res = {
+			statusCode: 200,
+			body: JSON.stringify({ text: string + " is not a valid player" })
+		}
+		callback(null, res);
+		endExecution(); //lol
+	} else {
+		loserId = loserId[0].slice(2, 11)
+		console.log("loserId: " + JSON.stringify(loserId));
+		return loserId;
+	}
+}
+
+async function getPlayerData(playerId) {
 	try {
 		const getParams = {
 			TableName: "Players",
@@ -234,10 +258,8 @@ async function getPlayerData(playerId, documentClient) {
 				"id": playerId
 			}
 		};
-		info = await documentClient.get(getParams).promise();
-
-		return info;
-	} 
+		return await documentClient.get(getParams).promise();
+	}
 	catch (err) {
 		console.log("getPlayerData: caught error " + err);
 	}
