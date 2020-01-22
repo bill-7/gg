@@ -235,8 +235,8 @@ async function winChance() {
 }
 
 function getLoserId(string) {
-	let loserId = string.trim().split('|')
-	if (loserId[0].length != 11) {
+	const loserTokens = string.trim().split('|')
+	if (loserTokens[0].length != 11) {
 		const res = {
 			statusCode: 200,
 			body: JSON.stringify({ text: string + " is not a valid player" })
@@ -244,7 +244,7 @@ function getLoserId(string) {
 		callback(null, res);
 		endExecution(); //lol
 	} else {
-		loserId = loserId[0].slice(2, 11)
+		const loserId = loserTokens[0].slice(2, 11)
 		console.log("loserId: " + JSON.stringify(loserId));
 		return loserId;
 	}
