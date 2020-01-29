@@ -26,8 +26,8 @@ exports.handler = async (event, context, cb) => {
 		case '/gg':
 			await recordWins();
 			break;
-		case '/wc':
-			await winChance();
+		case '/vp':
+			await versusPlayer();
 			break;
 	}
 }
@@ -220,15 +220,40 @@ async function leaderboard() {
 	callback(null, res);
 }
 
-async function winChance() {
+async function versusPlayer() {
 	const loserId = getLoserId(messageData.text)
 	const winnerInfo = await getPlayerData(messageData.user_id)
 	const loserInfo = await getPlayerData(loserId)
 	const e = new Elo()
-	const percentage = (e.odds(winnerInfo.Item.elo, loserInfo.Item.elo) * 100).toFixed(2);
+	const expectedPercentage = (e.odds(winnerInfo.Item.elo, loserInfo.Item.elo) * 100).toFixed(2);
+	let wins = 0
+	let losses = 0
+	let t = new Table
+
+	try {
+		const gameParams = {
+			TableName: "Games"
+		};
+		const gameInfo = await documentClient.scan(gameParams).promise();
+		gameInfo.Items.forEach(g => {
+			if (g.winner.name == winnerInfo.Item.name && g.loser.name == loserInfo.Item.name)
+				wins++
+			else if (g.winner.name == loserInfo.Item.name && g.loser.name == winnerInfo.Item.name) 
+				losses++
+		});
+	}
+	catch (err) {
+		console.log("caught error " + err);
+	}
+
 	const res = {
 		statusCode: 200,
-		body: JSON.stringify({ text: percentage + "% chance to win vs. " + loserInfo.Item.name })
+		body: JSON.stringify({ text: winnerInfo.Item.name + " (" + winnerInfo.Item.elo + ") vs. " + loserInfo.Item.name + " (" + loserInfo.Item.elo + ")\n\n"
+		+ "Wins: " + wins + "\n"
+		+ "Losses: " + losses + "\n"
+		+ "Games: " + (wins + losses) + "\n"
+		+ "Winrate: " + (wins / (wins + losses) * 100).toFixed(2) + "%\n"
+		+ "Elo guess: " + expectedPercentage + "%" })
 	};
 
 	callback(null, res);
