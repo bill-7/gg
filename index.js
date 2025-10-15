@@ -1,292 +1,400 @@
-'use strict'
+'use strict';
+
 const _ = require('lodash');
-const Table = require('easy-table')
-const AWS = require('aws-sdk')
-const querystring = require('querystring')
-const Elo = require('elo-js')
-const Uuid = require('uuid')
-const Moment = require('moment')
+const Table = require('easy-table');
+const AWS = require('aws-sdk');
+const querystring = require('querystring');
+const Elo = require('elo-js');
+const { v4: uuidv4 } = require('uuid');
+const moment = require('moment');
 
 const documentClient = new AWS.DynamoDB.DocumentClient();
-let messageData;
-let callback;
 
-exports.handler = async (event, context, cb) => {
-	callback = cb;
-	messageData = querystring.parse(JSON.stringify(event.body))
-	console.log("message: " + JSON.stringify(messageData))
+// Constants
+const TABLES = {
+  PLAYERS: 'Players',
+  GAMES: 'Games'
+};
 
-	switch (messageData.command) {
-		case '/lb':
-			await leaderboard();
-			break;
-		case '/tg':
-			await todaysGames();
-			break;
-		case '/gg':
-			await recordWins();
-			break;
-		case '/vp':
-			await versusPlayer();
-			break;
-	}
+const DEFAULT_ELO = 1000;
+const COMMANDS = {
+  LEADERBOARD: '/lb',
+  TODAYS_GAMES: '/tg',
+  RECORD_WIN: '/gg',
+  VERSUS_PLAYER: '/vp'
+};
+
+// Main handler
+exports.handler = async (event, context) => {
+  try {
+    // Handle browser GET requests (for testing)
+    if (event.requestContext && event.requestContext.http.method === 'GET') {
+      return {
+        statusCode: 200,
+        headers: { 'Content-Type': 'text/html' },
+        body: '<h1>Slack Bot is Running!</h1><p>Send POST requests from Slack slash commands.</p>'
+      };
+    }
+
+    // Function URLs send data differently than API Gateway
+    let body;
+    if (event.body) {
+      // If body is base64 encoded
+      if (event.isBase64Encoded) {
+        body = Buffer.from(event.body, 'base64').toString();
+      } else {
+        body = event.body;
+      }
+      body = querystring.parse(body);
+    } else {
+      body = event; // Direct invocation
+    }
+
+    console.log('Message received:', JSON.stringify(body));
+
+    const response = await routeCommand(body);
+    
+    return {
+      statusCode: 200,
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(response)
+    };
+  } catch (error) {
+    console.error('Handler error:', error);
+    return {
+      statusCode: 500,
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ text: 'An error occurred processing your request.' })
+    };
+  }
+};
+
+// Route commands to appropriate handlers
+async function routeCommand(messageData) {
+  const handlers = {
+    [COMMANDS.LEADERBOARD]: leaderboard,
+    [COMMANDS.TODAYS_GAMES]: todaysGames,
+    [COMMANDS.RECORD_WIN]: recordWins,
+    [COMMANDS.VERSUS_PLAYER]: versusPlayer
+  };
+
+  const handler = handlers[messageData.command];
+  if (!handler) {
+    return { text: `Unknown command: ${messageData.command}` };
+  }
+
+  return await handler(messageData);
 }
 
-async function recordWins() {
-	const messageTokens = messageData.text.trim().split(' ')
-	const loserId = getLoserId(messageTokens[0])
-	const winCount = (messageTokens.length == 2 && Number(messageTokens[1]) != NaN)
-		? Number(messageTokens[1]) 
-		: 1
-	
-	let resBody = "";
-	for (let i = 0; i < winCount; i++) {
-		resBody += (await recordWin(loserId, i * 3000) + "\n\n")
-	}
+// Record wins (handles multiple wins)
+async function recordWins(messageData) {
+  const messageTokens = messageData.text.trim().split(' ');
+  const loserId = parseLoserId(messageTokens[0]);
+  
+  if (!loserId) {
+    return { text: `${messageTokens[0]} is not a valid player` };
+  }
 
-	const res = {
-		statusCode: 200,
-		body: JSON.stringify({ text: resBody })
-	};
+  const winCount = messageTokens.length === 2 && !isNaN(messageTokens[1])
+    ? parseInt(messageTokens[1], 10)
+    : 1;
 
-	callback(null, res);
+  const results = [];
+  for (let i = 0; i < winCount; i++) {
+    const result = await recordSingleWin(messageData, loserId, i * 3000);
+    results.push(result);
+  }
+
+  return { text: results.join('\n\n') };
 }
 
-async function recordWin(loserId, timeOffset) {
-	const newElo = function (winner, loser) {
-		let e = new Elo();
-		const winnerNewElo = e.ifWins(winner, loser);
-		const loserNewElo = e.ifLoses(loser, winner);
-		return { "winner": winnerNewElo, "loser": loserNewElo };
-	};
-	let winnerInfo = await getPlayerData(messageData.user_id);
-	let winnerPutParams = {
-		TableName: "Players",
-		Item: {}
-	};
+// Record a single win
+async function recordSingleWin(messageData, loserId, timeOffset) {
+  try {
+    const [winnerInfo, loserInfo] = await Promise.all([
+      getPlayerData(messageData.user_id),
+      getPlayerData(loserId)
+    ]);
 
-	let loserInfo = await getPlayerData(loserId);
-	let loserPutParams = {
-		TableName: "Players",
-		Item: {}
-	};
-	let newElos = {};
-	try {
-		newElos = newElo(winnerInfo.Item ? Number(winnerInfo.Item.elo) : null, loserInfo.Item ? Number(loserInfo.Item.elo) : null);
-		console.log("new elos: ", JSON.stringify(newElos));
+    const winnerElo = winnerInfo?.elo || DEFAULT_ELO;
+    const loserElo = loserInfo?.elo || DEFAULT_ELO;
+    const newElos = calculateNewElos(winnerElo, loserElo);
 
-		if (_.isEmpty(winnerInfo)) {
-			winnerPutParams.Item = {
-				"id": messageData.user_id,
-				"name": messageData.user_name,
-				"wins": 1,
-				"losses": 0,
-				"elo": 1000
-			};
-		}
-		else {
-			winnerPutParams.Item = {
-				"id": winnerInfo.Item.id,
-				"name": winnerInfo.Item.name,
-				"wins": Number(winnerInfo.Item.wins) + 1,
-				"losses": Number(winnerInfo.Item.losses),
-				"elo": Number(newElos.winner)
-			};
-		}
-		try {
-			await documentClient.put(winnerPutParams).promise();
-		}
-		catch (err) {
-			console.log(err);
-		}
-		if (_.isEmpty(loserInfo)) {
-			loserPutParams.Item = {
-				"id": loserId,
-				"name": loserInfo.Item ? loserInfo.Item.name : "unknown",
-				"wins": 0,
-				"losses": 1,
-				"elo": 1000
-			};
-		}
-		else {
-			loserPutParams.Item = {
-				"id": loserId,
-				"name": loserInfo.Item ? loserInfo.Item.name : "unknown",
-				"wins": Number(loserInfo.Item.wins),
-				"losses": Number(loserInfo.Item.losses) + 1,
-				"elo": Number(newElos.loser)
-			};
-		}
-		try {
-			await documentClient.put(loserPutParams).promise();
-		}
-		catch (err) {
-			console.log(err);
-		}
-	}
-	catch (err) {
-		console.log("caught error " + err);
-	}
-	let gamePut = {
-		TableName: "Games",
-		Item: {
-			"id": Uuid(),
-			"datetime": Moment.now() + timeOffset,
-			"winner": {
-				"name": winnerInfo.Item.name,
-				"elo": {
-					"old": winnerInfo.Item.elo || 1000,
-					"new": newElos.winner
-				}
-			},
-			"loser": {
-				"name": loserInfo.Item.name,
-				"elo": {
-					"old": loserInfo.Item.elo || 1000,
-					"new": newElos.loser
-				}
-			}
-		}
-	};
-	console.log("gamePut", gamePut);
-	try {
-		await documentClient.put(gamePut).promise();
-	}
-	catch (err) {
-		console.log("game record error", err);
-	}
-	return winnerInfo.Item.name + ": " + winnerInfo.Item.elo + " -> " + newElos.winner + "\n" + loserInfo.Item.name + ": " + loserInfo.Item.elo + " -> " + newElos.loser
+    const winnerData = buildPlayerData(
+      messageData.user_id,
+      messageData.user_name,
+      winnerInfo,
+      newElos.winner,
+      true
+    );
+
+    const loserData = buildPlayerData(
+      loserId,
+      loserInfo?.name || 'unknown',
+      loserInfo,
+      newElos.loser,
+      false
+    );
+
+    // Update both players and record game
+    await Promise.all([
+      updatePlayer(winnerData),
+      updatePlayer(loserData),
+      recordGame(winnerInfo, loserInfo, newElos, timeOffset)
+    ]);
+
+    return formatEloChange(winnerInfo, loserInfo, newElos);
+  } catch (error) {
+    console.error('Error recording win:', error);
+    throw error;
+  }
 }
 
-async function todaysGames() {
-	let chosenDay = messageData.text ? Moment(messageData.text, 'DDMMYY') : Moment.now();
-	let t = new Table;
-	try {
-		const gameParams = {
-			TableName: "Games"
-		};
-		const gameInfo = await documentClient.scan(gameParams).promise();
-		gameInfo.Items.forEach(g => {
-			if (Moment(g.datetime).format('L') == Moment(chosenDay).format('L')) {
-				t.cell('Time', Moment(g.datetime).format('HH:mm:ss'));
-				t.cell('Winner', g.winner.name + ' (' + g.winner.elo.old + ' -> ' + g.winner.elo.new + ')');
-				t.cell('Loser', g.loser.name + ' (' + g.loser.elo.old + ' -> ' + g.loser.elo.new + ')');
-				t.newRow();
-			}
-		});
-		t.sort(['Time|asc']);
-		console.log("t: " + t.toString());
-	}
-	catch (err) {
-		console.log("caught error " + err);
-	}
-	const res = {
-		statusCode: 200,
-		body: JSON.stringify({ text: "```\n" + Moment(chosenDay).format('dddd, DD/MM/GG') + '\n\n' + t.toString() + "```" })
-	};
-	callback(null, res);
+// Calculate new ELO ratings
+function calculateNewElos(winnerElo, loserElo) {
+  const elo = new Elo();
+  return {
+    winner: elo.ifWins(winnerElo, loserElo),
+    loser: elo.ifLoses(loserElo, winnerElo)
+  };
 }
 
+// Build player data object
+function buildPlayerData(id, name, existingData, newElo, isWinner) {
+  const wins = (existingData?.wins || 0) + (isWinner ? 1 : 0);
+  const losses = (existingData?.losses || 0) + (isWinner ? 0 : 1);
+
+  return {
+    id,
+    name,
+    wins,
+    losses,
+    elo: newElo
+  };
+}
+
+// Update player in database
+async function updatePlayer(playerData) {
+  const params = {
+    TableName: TABLES.PLAYERS,
+    Item: playerData
+  };
+
+  try {
+    await documentClient.put(params).promise();
+  } catch (error) {
+    console.error('Error updating player:', error);
+    throw error;
+  }
+}
+
+// Record game in database
+async function recordGame(winnerInfo, loserInfo, newElos, timeOffset) {
+  const params = {
+    TableName: TABLES.GAMES,
+    Item: {
+      id: uuidv4(),
+      datetime: moment().valueOf() + timeOffset,
+      winner: {
+        name: winnerInfo?.name || 'unknown',
+        elo: {
+          old: winnerInfo?.elo || DEFAULT_ELO,
+          new: newElos.winner
+        }
+      },
+      loser: {
+        name: loserInfo?.name || 'unknown',
+        elo: {
+          old: loserInfo?.elo || DEFAULT_ELO,
+          new: newElos.loser
+        }
+      }
+    }
+  };
+
+  try {
+    await documentClient.put(params).promise();
+  } catch (error) {
+    console.error('Error recording game:', error);
+    throw error;
+  }
+}
+
+// Format ELO change message
+function formatEloChange(winnerInfo, loserInfo, newElos) {
+  const winnerOldElo = winnerInfo?.elo || DEFAULT_ELO;
+  const loserOldElo = loserInfo?.elo || DEFAULT_ELO;
+  
+  return `${winnerInfo?.name || 'unknown'}: ${winnerOldElo} → ${newElos.winner}\n` +
+         `${loserInfo?.name || 'unknown'}: ${loserOldElo} → ${newElos.loser}`;
+}
+
+// Display today's games
+async function todaysGames(messageData) {
+  try {
+    const chosenDay = messageData.text 
+      ? moment(messageData.text, 'DDMMYY')
+      : moment();
+
+    const games = await getAllGames();
+    const todaysGames = games.filter(game => 
+      moment(game.datetime).format('L') === chosenDay.format('L')
+    );
+
+    const table = new Table();
+    todaysGames
+      .sort((a, b) => a.datetime - b.datetime)
+      .forEach(game => {
+        table.cell('Time', moment(game.datetime).format('HH:mm:ss'));
+        table.cell('Winner', formatPlayerElo(game.winner));
+        table.cell('Loser', formatPlayerElo(game.loser));
+        table.newRow();
+      });
+
+    const header = chosenDay.format('dddd, DD/MM/YY');
+    return { text: `\`\`\`\n${header}\n\n${table.toString()}\`\`\`` };
+  } catch (error) {
+    console.error('Error fetching today\'s games:', error);
+    return { text: 'Error fetching games' };
+  }
+}
+
+// Display leaderboard
 async function leaderboard() {
-	let scanInfo;
-	let t = new Table;
-	try {
-		const scanParams = {
-			TableName: "Players"
-		};
-		scanInfo = await documentClient.scan(scanParams).promise();
-		console.log("scanInfo" + JSON.stringify(scanInfo));
-		scanInfo.Items.forEach(p => {
-			if (p.wins + p.losses != 0) {
-				t.cell('Player', p.name);
-				t.cell('Wins', p.wins);
-				t.cell('Losses', p.losses);
-				t.cell('Games', p.wins + p.losses);
-				t.cell('Winrate', (p.wins / (p.wins + p.losses) * 100).toFixed(2) + '%');
-				t.cell('Elo', p.elo);
-				t.newRow();
-			}
-		});
-		t.sort(['Elo|des']);
-		console.log("t: " + t.toString());
-	}
-	catch (err) {
-		console.log("caught error " + err);
-	}
-	const res = {
-		statusCode: 200,
-		body: JSON.stringify({ text: "```\n" + t.toString() + "```" })
-	};
-	callback(null, res);
+  try {
+    const players = await getAllPlayers();
+    const activePlayers = players.filter(p => (p.wins + p.losses) > 0);
+
+    const table = new Table();
+    activePlayers.forEach(player => {
+      const totalGames = player.wins + player.losses;
+      const winrate = ((player.wins / totalGames) * 100).toFixed(2);
+
+      table.cell('Player', player.name);
+      table.cell('Wins', player.wins);
+      table.cell('Losses', player.losses);
+      table.cell('Games', totalGames);
+      table.cell('Winrate', `${winrate}%`);
+      table.cell('Elo', player.elo);
+      table.newRow();
+    });
+
+    table.sort(['Elo|des']);
+    return { text: `\`\`\`\n${table.toString()}\`\`\`` };
+  } catch (error) {
+    console.error('Error fetching leaderboard:', error);
+    return { text: 'Error fetching leaderboard' };
+  }
 }
 
-async function versusPlayer() {
-	const loserId = getLoserId(messageData.text)
-	const winnerInfo = await getPlayerData(messageData.user_id)
-	const loserInfo = await getPlayerData(loserId)
-	const e = new Elo()
-	const expectedPercentage = (e.odds(winnerInfo.Item.elo, loserInfo.Item.elo) * 100).toFixed(2);
-	let wins = 0
-	let losses = 0
-	let t = new Table
+// Display head-to-head stats
+async function versusPlayer(messageData) {
+  try {
+    const loserId = parseLoserId(messageData.text);
+    if (!loserId) {
+      return { text: `${messageData.text} is not a valid player` };
+    }
 
-	try {
-		const gameParams = {
-			TableName: "Games"
-		};
-		const gameInfo = await documentClient.scan(gameParams).promise();
-		gameInfo.Items.forEach(g => {
-			if (g.winner.name == winnerInfo.Item.name && g.loser.name == loserInfo.Item.name)
-				wins++
-			else if (g.winner.name == loserInfo.Item.name && g.loser.name == winnerInfo.Item.name) 
-				losses++
-		});
-	}
-	catch (err) {
-		console.log("caught error " + err);
-	}
+    const [winnerInfo, loserInfo, games] = await Promise.all([
+      getPlayerData(messageData.user_id),
+      getPlayerData(loserId),
+      getAllGames()
+    ]);
 
-	const res = {
-		statusCode: 200,
-		body: JSON.stringify({ text: winnerInfo.Item.name + " (" + winnerInfo.Item.elo + ") vs. " + loserInfo.Item.name + " (" + loserInfo.Item.elo + ")\n\n"
-		+ "Wins: " + wins + "\n"
-		+ "Losses: " + losses + "\n"
-		+ "Games: " + (wins + losses) + "\n"
-		+ "Winrate: " + (wins / (wins + losses) * 100).toFixed(2) + "%\n"
-		+ "Elo guess: " + expectedPercentage + "%" })
-	};
+    if (!winnerInfo || !loserInfo) {
+      return { text: 'One or both players not found' };
+    }
 
-	callback(null, res);
+    const { wins, losses } = calculateHeadToHead(
+      games,
+      winnerInfo.name,
+      loserInfo.name
+    );
+
+    const elo = new Elo();
+    const expectedWinRate = (elo.odds(winnerInfo.elo, loserInfo.elo) * 100).toFixed(2);
+    const totalGames = wins + losses;
+    const actualWinRate = totalGames > 0 
+      ? ((wins / totalGames) * 100).toFixed(2)
+      : '0.00';
+
+    return {
+      text: `${winnerInfo.name} (${winnerInfo.elo}) vs. ${loserInfo.name} (${loserInfo.elo})\n\n` +
+            `Wins: ${wins}\n` +
+            `Losses: ${losses}\n` +
+            `Games: ${totalGames}\n` +
+            `Winrate: ${actualWinRate}%\n` +
+            `Expected winrate: ${expectedWinRate}%`
+    };
+  } catch (error) {
+    console.error('Error in versus player:', error);
+    return { text: 'Error fetching player comparison' };
+  }
 }
 
-function getLoserId(string) {
-	const loserTokens = string.trim().split('|')
-	if (loserTokens[0].length != 11) {
-		const res = {
-			statusCode: 200,
-			body: JSON.stringify({ text: string + " is not a valid player" })
-		}
-		callback(null, res);
-		endExecution(); //lol
-	} else {
-		const loserId = loserTokens[0].slice(2, 11)
-		console.log("loserId: " + JSON.stringify(loserId));
-		return loserId;
-	}
+// Calculate head-to-head record
+function calculateHeadToHead(games, player1Name, player2Name) {
+  return games.reduce((acc, game) => {
+    if (game.winner.name === player1Name && game.loser.name === player2Name) {
+      acc.wins++;
+    } else if (game.winner.name === player2Name && game.loser.name === player1Name) {
+      acc.losses++;
+    }
+    return acc;
+  }, { wins: 0, losses: 0 });
 }
 
+// Helper: Parse loser ID from Slack user mention
+function parseLoserId(text) {
+  const tokens = text.trim().split('|');
+  if (tokens[0].length !== 11 || !tokens[0].startsWith('<@')) {
+    return null;
+  }
+  return tokens[0].slice(2, 11);
+}
+
+// Helper: Format player ELO display
+function formatPlayerElo(player) {
+  return `${player.name} (${player.elo.old} → ${player.elo.new})`;
+}
+
+// Database queries
 async function getPlayerData(playerId) {
-	try {
-		const getParams = {
-			TableName: "Players",
-			Key: {
-				"id": playerId
-			}
-		};
-		return await documentClient.get(getParams).promise();
-	}
-	catch (err) {
-		console.log("getPlayerData: caught error " + err);
-	}
+  try {
+    const params = {
+      TableName: TABLES.PLAYERS,
+      Key: { id: playerId }
+    };
+    const result = await documentClient.get(params).promise();
+    return result.Item;
+  } catch (error) {
+    console.error('Error getting player data:', error);
+    throw error;
+  }
 }
 
+async function getAllPlayers() {
+  try {
+    const params = { TableName: TABLES.PLAYERS };
+    const result = await documentClient.scan(params).promise();
+    return result.Items;
+  } catch (error) {
+    console.error('Error scanning players:', error);
+    throw error;
+  }
+}
+
+async function getAllGames() {
+  try {
+    const params = { TableName: TABLES.GAMES };
+    const result = await documentClient.scan(params).promise();
+    return result.Items;
+  } catch (error) {
+    console.error('Error scanning games:', error);
+    throw error;
+  }
+}
