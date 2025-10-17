@@ -21,7 +21,8 @@ const COMMANDS = {
   LEADERBOARD: '/lb',
   TODAYS_GAMES: '/tg',
   RECORD_WIN: '/gg',
-  VERSUS_PLAYER: '/vp'
+  VERSUS_PLAYER: '/vp',
+  ADD_PLAYER: '/add'
 };
 
 // Main handler
@@ -79,7 +80,8 @@ async function routeCommand(messageData) {
     [COMMANDS.LEADERBOARD]: leaderboard,
     [COMMANDS.TODAYS_GAMES]: todaysGames,
     [COMMANDS.RECORD_WIN]: recordWins,
-    [COMMANDS.VERSUS_PLAYER]: versusPlayer
+    [COMMANDS.VERSUS_PLAYER]: versusPlayer,
+    [COMMANDS.ADD_PLAYER]: addPlayer
   };
 
   const handler = handlers[messageData.command];
@@ -93,10 +95,17 @@ async function routeCommand(messageData) {
 // Record wins (handles multiple wins)
 async function recordWins(messageData) {
   const messageTokens = messageData.text.trim().split(' ');
-  const loserId = parseLoserId(messageTokens[0]);
+  const username = extractUsername(messageTokens[0]);
   
-  if (!loserId) {
-    return { text: `${messageTokens[0]} is not a valid player` };
+  if (!username) {
+    return { text: `Please provide a valid username` };
+  }
+
+  // Get loser info by username
+  const loserInfo = await findPlayerByUsername(username);
+
+  if (!loserInfo) {
+    return { text: `Player "${username}" not found. Use /add to add them first.` };
   }
 
   const winCount = messageTokens.length === 2 && !isNaN(messageTokens[1])
@@ -105,11 +114,59 @@ async function recordWins(messageData) {
 
   const results = [];
   for (let i = 0; i < winCount; i++) {
-    const result = await recordSingleWin(messageData, loserId, i * 3000);
+    const result = await recordSingleWin(messageData, loserInfo.id, i * 3000);
     results.push(result);
   }
 
   return { text: results.join('\n\n') };
+}
+
+// Add a new player to the database
+async function addPlayer(messageData) {
+  try {
+    // Check if we're adding someone else or ourselves
+    let playerId, playerName;
+    
+    if (messageData.text && messageData.text.trim()) {
+      // Adding another player
+      playerId = parseLoserId(messageData.text.trim());
+      if (!playerId) {
+        return { text: `${messageData.text} is not a valid player mention` };
+      }
+      
+      // Try to get their name from existing data, otherwise use "unknown"
+      const existingData = await getPlayerData(playerId);
+      playerName = existingData?.name || 'unknown';
+    } else {
+      // Adding ourselves
+      playerId = messageData.user_id;
+      playerName = messageData.user_name;
+    }
+
+    // Check if player already exists
+    const existingPlayer = await getPlayerData(playerId);
+    if (existingPlayer) {
+      return { 
+        text: `${existingPlayer.name} is already registered with ${existingPlayer.wins} wins, ${existingPlayer.losses} losses, and ${existingPlayer.elo} ELO` 
+      };
+    }
+
+    // Create new player with default stats
+    const newPlayer = {
+      id: playerId,
+      name: playerName,
+      wins: 0,
+      losses: 0,
+      elo: DEFAULT_ELO
+    };
+
+    await updatePlayer(newPlayer);
+    
+    return { text: `✅ Added ${playerName} to the leaderboard with ${DEFAULT_ELO} ELO` };
+  } catch (error) {
+    console.error('Error adding player:', error);
+    return { text: 'Error adding player to database' };
+  }
 }
 
 // Record a single win
@@ -234,6 +291,30 @@ function formatEloChange(winnerInfo, loserInfo, newElos) {
 }
 
 // Display today's games
+function getUKOffset(date) {
+  const year = date.getFullYear();
+  
+  // Last Sunday of March at 1am UTC
+  const marchLastSunday = new Date(Date.UTC(year, 2, 31));
+  marchLastSunday.setUTCDate(31 - marchLastSunday.getUTCDay());
+  marchLastSunday.setUTCHours(1, 0, 0, 0);
+  
+  // Last Sunday of October at 1am UTC
+  const octoberLastSunday = new Date(Date.UTC(year, 9, 31));
+  octoberLastSunday.setUTCDate(31 - octoberLastSunday.getUTCDay());
+  octoberLastSunday.setUTCHours(1, 0, 0, 0);
+  
+  // If date is between March and October last Sundays, it's BST (UTC+1)
+  return (date >= marchLastSunday && date < octoberLastSunday) ? 1 : 0;
+}
+
+const shortName = (name) => {
+  const parts = name.split('.');
+  const firstName = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+  const lastInitial = parts[1][0].toUpperCase();
+  return firstName + ' ' + lastInitial;
+};
+
 async function todaysGames(messageData) {
   try {
     const chosenDay = messageData.text 
@@ -241,15 +322,17 @@ async function todaysGames(messageData) {
       : moment();
 
     const games = await getAllGames();
-    const todaysGames = games.filter(game => 
-      moment(game.datetime).format('L') === chosenDay.format('L')
-    );
+    const todaysGames = games.filter(game => {
+      const gameDate = moment(game.datetime).utcOffset(getUKOffset(new Date(game.datetime)));
+      return gameDate.format('L') === chosenDay.format('L');
+    });
 
     const table = new Table();
     todaysGames
       .sort((a, b) => a.datetime - b.datetime)
       .forEach(game => {
-        table.cell('Time', moment(game.datetime).format('HH:mm:ss'));
+        const gameTime = moment(game.datetime).utcOffset(getUKOffset(new Date(game.datetime)));
+        table.cell('Time', gameTime.format('HH:mm:ss'));
         table.cell('Winner', formatPlayerElo(game.winner));
         table.cell('Loser', formatPlayerElo(game.loser));
         table.newRow();
@@ -263,27 +346,30 @@ async function todaysGames(messageData) {
   }
 }
 
+
 // Display leaderboard
 async function leaderboard() {
   try {
     const players = await getAllPlayers();
     const activePlayers = players.filter(p => (p.wins + p.losses) > 0);
 
-    const table = new Table();
-    activePlayers.forEach(player => {
-      const totalGames = player.wins + player.losses;
-      const winrate = ((player.wins / totalGames) * 100).toFixed(2);
+    activePlayers.sort((a, b) => b.elo - a.elo);
 
-      table.cell('Player', player.name);
-      table.cell('Wins', player.wins);
-      table.cell('Losses', player.losses);
-      table.cell('Games', totalGames);
-      table.cell('Winrate', `${winrate}%`);
+    const table = new Table();
+    activePlayers.forEach((player, i) => {
+      const totalGames = player.wins + player.losses;
+      const winrate = ((player.wins / totalGames) * 100).toFixed(1);
+      
+      table.cell('#', i + 1);
+      table.cell('Player', shortName(player.name));
+      table.cell('Win', player.wins);
+      table.cell('Loss', player.losses);
+      table.cell('Win%', `${winrate}%`);
       table.cell('Elo', player.elo);
       table.newRow();
     });
 
-    table.sort(['Elo|des']);
+    // Remove the table.sort() since we already sorted the array
     return { text: `\`\`\`\n${table.toString()}\`\`\`` };
   } catch (error) {
     console.error('Error fetching leaderboard:', error);
@@ -294,19 +380,26 @@ async function leaderboard() {
 // Display head-to-head stats
 async function versusPlayer(messageData) {
   try {
-    const loserId = parseLoserId(messageData.text);
-    if (!loserId) {
-      return { text: `${messageData.text} is not a valid player` };
+    const username = extractUsername(messageData.text);
+    
+    if (!username) {
+      return { text: 'Please provide a valid username' };
     }
 
-    const [winnerInfo, loserInfo, games] = await Promise.all([
+    // Get opponent info by username
+    const loserInfo = await findPlayerByUsername(username);
+
+    if (!loserInfo) {
+      return { text: `Player "${username}" not found. Use /add to add them first.` };
+    }
+
+    const [winnerInfo, games] = await Promise.all([
       getPlayerData(messageData.user_id),
-      getPlayerData(loserId),
       getAllGames()
     ]);
 
-    if (!winnerInfo || !loserInfo) {
-      return { text: 'One or both players not found' };
+    if (!winnerInfo) {
+      return { text: 'You need to be added to the leaderboard first. Use /add' };
     }
 
     const { wins, losses } = calculateHeadToHead(
@@ -348,18 +441,34 @@ function calculateHeadToHead(games, player1Name, player2Name) {
   }, { wins: 0, losses: 0 });
 }
 
-// Helper: Parse loser ID from Slack user mention
-function parseLoserId(text) {
-  const tokens = text.trim().split('|');
-  if (tokens[0].length !== 11 || !tokens[0].startsWith('<@')) {
+// Helper: Extract username from text (strips @ symbol)
+function extractUsername(text) {
+  if (!text || !text.trim()) {
     return null;
   }
-  return tokens[0].slice(2, 11);
+  
+  const trimmed = text.trim();
+  
+  // Remove @ symbol if present and get first word
+  const username = trimmed.replace('@', '').split(/\s+/)[0];
+  
+  return username || null;
+}
+
+// Helper: Find player by username
+async function findPlayerByUsername(username) {
+  try {
+    const players = await getAllPlayers();
+    return players.find(p => p.name.toLowerCase() === username.toLowerCase());
+  } catch (error) {
+    console.error('Error finding player by username:', error);
+    return null;
+  }
 }
 
 // Helper: Format player ELO display
 function formatPlayerElo(player) {
-  return `${player.name} (${player.elo.old} → ${player.elo.new})`;
+  return `${shortName(player.name)} (${player.elo.old} → ${player.elo.new})`;
 }
 
 // Database queries
